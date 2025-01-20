@@ -5,8 +5,12 @@
 #include "map_memory_core.hpp"
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
 #include <utility> // For std::pair
 #include <memory>  // For smart pointers
+#include <cmath>
+#include <algorithm>
 
 class MapMemoryNode : public rclcpp::Node {
   public:

@@ -15,14 +15,17 @@ using namespace std;
 
 CostmapNode::CostmapNode() 
 : Node("costmap"), 
-  costmap_(robot::CostmapCore(this->get_logger())){
-  grid_data_.size = 100;
-  grid_data_.max_cost = 100;
-  grid_data_.radius = 10;
-  grid_data_.resolution = 0.1;
-  grid_data_.center = {
-    origin_.position.x, origin_.position.y
-    };
+  costmap_(robot::CostmapCore(this->get_logger()))
+{
+  grid_data_.size       = 200;   // 100 x 100 grid
+  grid_data_.max_cost   = 100;
+  grid_data_.radius     = 10;    // inflation radius in cells
+  grid_data_.resolution = 0.1;   // each cell is 0.1m
+
+  // Place the "robot's origin" at the center of the array
+  // so negative (x,y) from the sensor will become valid indices.
+  grid_data_.center.first  = grid_data_.size / 2;
+  grid_data_.center.second = grid_data_.size / 2;
 
   occupancy_grid_ = new int*[grid_data_.size];
   for(int i = 0; i < grid_data_.size; i++){
@@ -32,10 +35,16 @@ CostmapNode::CostmapNode()
     }
   }
 
-  // Create Subscriber
-  lidar_sub = this->create_subscription<sensor_msgs::msg::LaserScan>("/lidar", 10, std::bind(&CostmapNode::lidarCallBack, this, std::placeholders::_1));
-  // Create Publisher
-  costmap_pub = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/costmap", 10);
+  lidar_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
+    "/lidar",
+    10, 
+    std::bind(&CostmapNode::lidarCallBack, this, std::placeholders::_1)
+  );
+
+  costmap_pub = this->create_publisher<nav_msgs::msg::OccupancyGrid>(
+    "/costmap",
+    10
+  );
 
   timer_ = this->create_wall_timer(
     std::chrono::milliseconds(200), 
@@ -43,48 +52,48 @@ CostmapNode::CostmapNode()
   );
 }
 
-void CostmapNode::lidarCallBack(const sensor_msgs::msg::LaserScan::SharedPtr msg){
+void CostmapNode::lidarCallBack(const sensor_msgs::msg::LaserScan::SharedPtr msg)
+{
+  // Use the same header in the final OccupancyGrid
   message.header = msg->header;
+
+  // Get the array-center offset (where the robot is in the array)
   int center_x = grid_data_.center.first;
   int center_y = grid_data_.center.second;
 
-  //RCLCPP_INFO(this->get_logger(), "nagle max = %f", msg.angle_max);
-
+  // For each measurement in the LaserScan
   for (size_t i = 0; i < msg->ranges.size(); i++){
     double range = msg->ranges[i];
     double angle = msg->angle_min + i * msg->angle_increment;
 
-    if (range > grid_data_.size/2)
+    // Optionally skip very large or invalid range readings
+    if (!std::isfinite(range)) {
       continue;
+    }
+    // You may also skip if range is out of map bounds
+    if (range > (grid_data_.size * grid_data_.resolution / 2.0)) {
+      continue;
+    }
 
-    // Relative (x, y) coords
+    // Compute x,y in the robot frame
     double x = range * std::cos(angle);
     double y = range * std::sin(angle);
 
-    //RCLCPP_INFO(this->get_logger(), "x  %f", x);
+    // Transform those x,y into array indices by adding center offset
+    // and dividing by the resolution
+    int grid_x = static_cast<int>( (x / grid_data_.resolution) + center_x );
+    int grid_y = static_cast<int>( (y / grid_data_.resolution) + center_y );
 
-
-    int grid_x = static_cast<int>((x + center_x)/grid_data_.resolution);
-    int grid_y = static_cast<int>((y + center_y)/grid_data_.resolution);
-
-    //RCLCPP_INFO(this->get_logger(), "Range  %f", range);
-
-    //RCLCPP_INFO(this->get_logger(), "Global coords %f, Local grid?  %f", x + center_x, (x + center_x)/grid_data_.resolution);
-
-
-    //RCLCPP_INFO(this->get_logger(), "Okay asoidjaslknd ");
-
-    if ((grid_x >= 0) && (grid_x < grid_data_.size) && (grid_y >= 0) && (grid_y < grid_data_.size)){
-      
-      //RCLCPP_INFO(this->get_logger(), "Position  (%f, %f)", x + center_x, y + center_y);
-
-
+    // Boundary check: must be within [0, size)
+    if ((grid_x >= 0) && (grid_x < grid_data_.size) &&
+        (grid_y >= 0) && (grid_y < grid_data_.size))
+    {
+      // Mark this cell as an obstacle
       occupancy_grid_[grid_y][grid_x] = 100;
-      //RCLCPP_INFO(this->get_logger(), "occupancy grid %f", occupancy_grid_[grid_y][grid_x]);
 
-
-      // Inflate obstacles with BFS
-      this->inflateNeighbours(occupancy_grid_,
+      // Inflate the obstacle with BFS
+      this->inflateNeighbours(
+        occupancy_grid_,
         grid_x,
         grid_y,
         grid_data_.radius,
@@ -95,7 +104,6 @@ void CostmapNode::lidarCallBack(const sensor_msgs::msg::LaserScan::SharedPtr msg
   }
 }
 
-
 void CostmapNode::inflateNeighbours(
   int **occupancy_grid, 
   int x, 
@@ -104,7 +112,7 @@ void CostmapNode::inflateNeighbours(
   int grid_size,
   double max_cost
 ){
-  // normal bfs
+  // normal BFS
   queue<pair<int, int>> q;
   std::unordered_set<long long> visited; 
 
@@ -116,6 +124,7 @@ void CostmapNode::inflateNeighbours(
     {1, 0}, {0, 1}, {-1, 0}, {0, -1}
   };
 
+  // Start BFS from the obstacle cell
   q.push({y, x});
   visited.insert(encode(y, x));
 
@@ -157,6 +166,7 @@ int* CostmapNode::flattenArray(int **arr, int grid_size){
   for (int i = 0; i < grid_size; i++){
     for (int j = 0; j < grid_size; j++){
       new_occupancy[i * grid_size + j] = arr[i][j];
+      // Optionally reset each cell after flattening
       arr[i][j] = 0;
     }
   }
@@ -164,33 +174,35 @@ int* CostmapNode::flattenArray(int **arr, int grid_size){
 }
 
 void CostmapNode::publishGrid(){
-  message.info.width = grid_data_.size;
-  message.info.height = grid_data_.size;
-  message.info.resolution = grid_data_.resolution; 
-  message.info.origin.position.x = -1 * origin_.position.x*grid_data_.resolution;
-  message.info.origin.position.y = -1 * origin_.position.y*grid_data_.resolution;
+  message.info.width      = grid_data_.size;
+  message.info.height     = grid_data_.size;
+  message.info.resolution = grid_data_.resolution;
 
-  message.data.assign(pow(grid_data_.size,2), -1);
+  // Place the origin so that cell [0,0] is at
+  //  (-size/2 * resolution, -size/2 * resolution) in world coordinates.
+  message.info.origin.position.x = -(grid_data_.size / 2.0) * grid_data_.resolution;
+  message.info.origin.position.y = -(grid_data_.size / 2.0) * grid_data_.resolution;
+  message.info.origin.position.z = 0.0;
+  message.info.origin.orientation.w = 1.0;  // no rotation
 
+  // Initialize data with -1 (unknown)
+  message.data.assign(grid_data_.size * grid_data_.size, -1);
+
+  // Flatten the 2D array to 1D
   int *flat = CostmapNode::flattenArray(occupancy_grid_, grid_data_.size);
-  // OccupancyGrid's 'data' is std::vector<int8_t>
+
+  // OccupancyGrid data is a std::vector<int8_t>, so we must clamp [0..100]
+  // and cast each cell into int8_t.
   message.data.resize(grid_data_.size * grid_data_.size);
   for(int i = 0; i < grid_data_.size * grid_data_.size; i++){
     int val = flat[i];
-    //RCLCPP_INFO(this->get_logger(), "Publishing costmap of size %d", flat[i]);
-
     if (val > 100) val = 100;
     if (val < 0)   val = 0;
     message.data[i] = static_cast<int8_t>(val);
   }
-  delete [] flat; 
+  delete [] flat; // Clean up
 
-  for (int i = 0; i < grid_data_.size; i++){
-    for (int j = 0; j < grid_data_.size; j++){
-      occupancy_grid_[i][j] = 0;
-    }
-  }
-
+  // Publish
   costmap_pub->publish(message);
 }
 
